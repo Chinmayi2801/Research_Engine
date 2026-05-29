@@ -5,8 +5,11 @@ import os
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+# load .env from project root (one level up from src)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+
+print(f"DEBUG: API_KEY loaded: {API_KEY[:10] if API_KEY else 'NONE'}...")
 
 def fetch_semantic_scholar_data(arxiv_id):
     """
@@ -23,6 +26,7 @@ def fetch_semantic_scholar_data(arxiv_id):
     try:
         headers = {"x-api-key": API_KEY}
         response = requests.get(url, params=params, headers=headers)
+
 
         
         if response.status_code == 200:
@@ -57,6 +61,7 @@ def fetch_semantic_scholar_data(arxiv_id):
             }
         
         elif response.status_code == 429:
+            print(f"DEBUG: status={response.status_code}, response={response.text[:200]}")
             # rate limited, wait and retry
             print(f"Rate limited. Waiting 60 seconds...")
             time.sleep(60)
