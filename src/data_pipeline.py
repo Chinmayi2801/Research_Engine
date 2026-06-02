@@ -177,15 +177,12 @@ def merge_all_topic_files(output_path="../data/master_papers.csv"):
 if __name__ == "__main__":
     # define your topics here
     topics = [
-        "machine learning",
-        "computer vision",
-        "natural language processing",
-        "reinforcement learning",
-        "graph neural networks"
+        "graph neural networks",   
     ]
     
     # fetch each topic
     for topic in topics:
+        
         run_pipeline(topic, max_results=200)
         print("Sleeping 10 seconds before next topic...")
         time.sleep(10)
