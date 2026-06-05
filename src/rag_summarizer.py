@@ -2,10 +2,16 @@
 RAG-based topic summarization using Groq's LLM API.
 
 Workflow:
-1. User provides a query (e.g., "graph neural networks for drug discovery")
+1. User provides a query
 2. FAISS retrieves the top-N most semantically relevant papers
 3. Paper metadata + abstracts are formatted into a structured prompt
 4. Groq's LLM generates a coherent summary of the research area
+
+Prompt tuned (Day 11) to address four issues observed in v1:
+- Force-fitting tangentially-related retrieved papers into the query's narrative
+- Misrepresenting paper contributions to fit the query
+- Wasted sentences about citation counts when all are zero
+- Generic boilerplate opening/closing paragraphs
 """
 
 import os
@@ -14,7 +20,7 @@ from dotenv import load_dotenv
 from groq import Groq
 from search_engine import search_papers
 
-# load .env from project root (one level up from src/)
+# load .env from project root
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -23,12 +29,8 @@ if not GROQ_API_KEY:
 
 print(f"DEBUG: GROQ_API_KEY loaded: {GROQ_API_KEY[:10]}...")
 
-# initialize Groq client once at import time
 client = Groq(api_key=GROQ_API_KEY)
 
-# model choice — llama 3.3 70b is the best general-purpose model on Groq's free tier
-# if this errors with "model not found", check https://console.groq.com/docs/models
-# for the current list and replace the name
 MODEL = "llama-3.3-70b-versatile"
 
 
@@ -37,7 +39,6 @@ def get_papers_with_abstracts(query, top_k=10,
     """
     Retrieves top-k papers for a query via FAISS, then joins with the full
     papers CSV to include abstracts (which search_papers does not return).
-    Returns a DataFrame sorted by similarity.
     """
     search_results = search_papers(query, top_k=top_k)
     full_df = pd.read_csv(papers_path)
@@ -54,7 +55,6 @@ def get_papers_with_abstracts(query, top_k=10,
 def format_papers_for_prompt(papers_df):
     """
     Formats papers into a structured context block for the LLM prompt.
-    Truncates long fields so the prompt stays within reasonable token limits.
     """
     blocks = []
     for i, row in papers_df.iterrows():
@@ -81,21 +81,9 @@ def format_papers_for_prompt(papers_df):
     return "\n".join(blocks)
 
 
-def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=1500):
+def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=800):
     """
     Generates a RAG-based summary of a research topic.
-
-    Args:
-        query: search string (e.g., "transformers for time series")
-        top_k: number of papers to retrieve and include in the prompt
-        temperature: LLM sampling temperature (lower = more focused)
-        max_tokens: max tokens in the generated summary
-
-    Returns:
-        dict with keys:
-            'query'       : the input query
-            'summary'     : LLM-generated summary text
-            'papers_used' : DataFrame of the papers used in context
     """
     print(f"\nRetrieving top {top_k} papers for query: '{query}'")
     papers = get_papers_with_abstracts(query, top_k=top_k)
@@ -104,23 +92,37 @@ def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=1500):
     paper_context = format_papers_for_prompt(papers)
 
     system_msg = (
-        "You are a research summarization assistant. You help early-career "
-        "researchers quickly understand emerging areas of research by "
-        "synthesizing information across multiple related papers."
+        "You are a research summarization assistant. You synthesize information "
+        "across retrieved papers to help researchers understand a topic. "
+        "Critical rule: only state claims that are directly supported by the paper "
+        "abstracts provided. Do not extrapolate or invent details about a paper's "
+        "contributions. If a retrieved paper is not actually about the user's query, "
+        "say so explicitly rather than forcing it into the narrative."
     )
 
     user_msg = (
-        f"The user is researching the area: \"{query}\"\n\n"
-        f"Below are the {len(papers)} most relevant papers retrieved from a "
-        f"research database. For each, you have its title, authors, citation "
-        f"count, and abstract.\n\n"
-        f"Your task: Write a clear, well-structured summary (300-500 words) "
-        f"of this research area based on these papers. The summary should:\n"
-        f"1. Identify the main themes, approaches, and methods across the papers\n"
-        f"2. Highlight notable findings, techniques, or open challenges\n"
-        f"3. Note which papers appear most influential based on citation count\n"
-        f"4. Be written for an early-career researcher entering this field\n"
-        f"5. Use plain prose. No bullet points or numbered lists.\n\n"
+        f"User query: \"{query}\"\n\n"
+        f"Below are {len(papers)} papers retrieved from a research database via "
+        f"semantic search. Some may directly match the query; others may be only "
+        f"tangentially related - that is normal in semantic retrieval.\n\n"
+        f"Write a summary following these rules strictly:\n\n"
+        f"1. Open with substantive content. Do NOT begin with generic phrases like "
+        f"\"This is a rapidly evolving field\" or \"has garnered significant attention.\"\n"
+        f"2. State briefly which retrieved papers are directly relevant to the query. "
+        f"If some are only tangentially related, name them and set them aside or "
+        f"explain the loose connection - do not pretend they are central to the topic.\n"
+        f"3. For the directly relevant papers, describe their actual methods and "
+        f"contributions, citing each by its title. Do not invent contributions.\n"
+        f"4. Identify real methodological or thematic connections between papers "
+        f"where they exist. Do not invent connections.\n"
+        f"5. Do NOT mention citation counts unless at least one paper has a notable "
+        f"count (50+). If all are zero or low, ignore citations entirely.\n"
+        f"6. Close with a substantive observation about the state of the area based "
+        f"on what is in front of you. Do NOT use generic closers like \"vibrant and "
+        f"dynamic field\" or \"crucial for advancing the field.\"\n"
+        f"7. Length: 250-400 words. Tighter is better.\n"
+        f"8. Plain prose only. No bullet points, numbered lists, headers, or "
+        f"markdown formatting.\n\n"
         f"PAPERS:\n\n{paper_context}\n\n"
         f"Write the summary now."
     )
@@ -146,7 +148,7 @@ def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=1500):
 
 
 if __name__ == "__main__":
-    test_query = "graph neural networks for molecular property prediction"
+    test_query = "quantum cryptography"
 
     result = summarize_topic(test_query, top_k=8)
 
