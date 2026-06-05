@@ -20,7 +20,7 @@ def fetch_semantic_scholar_data(arxiv_id):
     url = f"https://api.semanticscholar.org/graph/v1/paper/arXiv:{arxiv_id}"
     
     params = {
-        "fields": "citationCount,influentialCitationCount,authors.affiliations"
+        "fields": "citationCount,influentialCitationCount,referenceCount,venue,authors.affiliations,authors.hIndex"
     }
     
     try:
@@ -34,20 +34,35 @@ def fetch_semantic_scholar_data(arxiv_id):
             
             citation_count = data.get("citationCount", 0)
             influential_citation_count = data.get("influentialCitationCount", 0)
+            reference_count = data.get("referenceCount", 0)
+            venue = data.get("venue", "") or ""
+
             
             # extract all unique affiliations across all authors
             affiliations = []
+            h_indices = []
+
             for author in data.get("authors", []):
                 for affiliation in author.get("affiliations", []):
                     if affiliation and affiliation not in affiliations:
                         affiliations.append(affiliation)
-            
+                h_index = author.get("hIndex")
+                if h_index is not None:
+                    h_indices.append(h_index)
+                
             affiliations_str = ", ".join(affiliations)
+            mean_h_index = sum(h_indices) / len(h_indices) if h_indices else 0
+            max_h_index = max(h_indices) if h_indices else 0
+
             
             return {
                 "arxiv_id": arxiv_id,
                 "citation_count": citation_count,
                 "influential_citation_count": influential_citation_count,
+                "reference_count": reference_count,
+                "venue": venue,
+                "mean_h_index": mean_h_index,
+                "max_h_index": max_h_index,
                 "affiliations": affiliations_str
             }
         
@@ -57,6 +72,10 @@ def fetch_semantic_scholar_data(arxiv_id):
                 "arxiv_id": arxiv_id,
                 "citation_count": 0,
                 "influential_citation_count": 0,
+                "reference_count": 0,
+                "venue": "",
+                "mean_h_index": 0,
+                "max_h_index": 0,
                 "affiliations": ""
             }
         

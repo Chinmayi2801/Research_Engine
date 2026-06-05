@@ -74,6 +74,10 @@ def clean_dataframe(df):
     # fill missing citation values with 0
     df["citation_count"] = df["citation_count"].fillna(0).astype(int)
     df["influential_citation_count"] = df["influential_citation_count"].fillna(0).astype(int)
+    df["reference_count"] = df["reference_count"].fillna(0).astype(int)
+    df["venue"] = df["venue"].fillna("")
+    df["mean_h_index"] = df["mean_h_index"].fillna(0)
+    df["max_h_index"] = df["max_h_index"].fillna(0)
     df["affiliations"] = df["affiliations"].fillna("")
     
     return df

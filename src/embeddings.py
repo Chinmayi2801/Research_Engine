@@ -88,4 +88,4 @@ if __name__ == "__main__":
     print("\n--- Sanity check ---")
     print(f"First paper title: {df['title'].iloc[0]}")
     print(f"First embedding shape: {embeddings[0].shape}")
-    print(f"First 5 values of first embedding: {embeddings[0][:5]}")
+    print(f"First 5 values of first embedding: {embeddings[0][:5]}")       
