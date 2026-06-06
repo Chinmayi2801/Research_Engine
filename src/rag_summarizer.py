@@ -1,20 +1,23 @@
 """
 RAG-based topic summarization using Groq's LLM API.
 
+Day 10: Initial RAG pipeline.
+Day 11: Prompt tuning - honesty bucketing, citation suppression, no boilerplate.
+Day 12: JSON-backed persistent cache to avoid re-hitting Groq on repeated queries.
+
 Workflow:
 1. User provides a query
-2. FAISS retrieves the top-N most semantically relevant papers
-3. Paper metadata + abstracts are formatted into a structured prompt
-4. Groq's LLM generates a coherent summary of the research area
-
-Prompt tuned (Day 11) to address four issues observed in v1:
-- Force-fitting tangentially-related retrieved papers into the query's narrative
-- Misrepresenting paper contributions to fit the query
-- Wasted sentences about citation counts when all are zero
-- Generic boilerplate opening/closing paragraphs
+2. Check cache - return cached summary if query was seen before
+3. Otherwise: FAISS retrieves top-N most semantically relevant papers
+4. Paper metadata + abstracts are formatted into a structured prompt
+5. Groq's LLM generates a coherent summary
+6. Result is written to cache before returning
 """
 
 import os
+import json
+import hashlib
+from datetime import datetime
 import pandas as pd
 from dotenv import load_dotenv
 from groq import Groq
@@ -30,9 +33,60 @@ if not GROQ_API_KEY:
 print(f"DEBUG: GROQ_API_KEY loaded: {GROQ_API_KEY[:10]}...")
 
 client = Groq(api_key=GROQ_API_KEY)
-
 MODEL = "llama-3.3-70b-versatile"
 
+CACHE_PATH = "../models/rag_cache.json"
+
+
+# ----------------------------------------------------------------------------
+# CACHE HELPERS
+# ----------------------------------------------------------------------------
+
+def _cache_key(query, top_k, temperature):
+    """Generate a deterministic hash key for a (query, top_k, temperature) tuple."""
+    payload = f"{query.lower().strip()}|{top_k}|{temperature}"
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def _load_cache():
+    """Load the cache dict from disk. Returns empty dict if missing or corrupt."""
+    if not os.path.exists(CACHE_PATH):
+        return {}
+    try:
+        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"WARNING: Cache file unreadable ({e}). Starting fresh.")
+        return {}
+
+
+def _save_cache(cache):
+    """Persist the cache dict to disk."""
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    with open(CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def clear_cache():
+    """Wipe the cache. Useful during development."""
+    if os.path.exists(CACHE_PATH):
+        os.remove(CACHE_PATH)
+        print(f"Cache cleared: {CACHE_PATH}")
+    else:
+        print("No cache file to clear.")
+
+
+def cache_stats():
+    """Print number of cached entries and the queries they were generated from."""
+    cache = _load_cache()
+    print(f"\nCache: {len(cache)} entries")
+    for key, entry in cache.items():
+        print(f"  [{key[:8]}] '{entry['query']}' (cached {entry.get('cached_at', 'unknown')})")
+
+
+# ----------------------------------------------------------------------------
+# RETRIEVAL HELPERS
+# ----------------------------------------------------------------------------
 
 def get_papers_with_abstracts(query, top_k=10,
                               papers_path="../models/papers_with_topics.csv"):
@@ -53,9 +107,7 @@ def get_papers_with_abstracts(query, top_k=10,
 
 
 def format_papers_for_prompt(papers_df):
-    """
-    Formats papers into a structured context block for the LLM prompt.
-    """
+    """Format papers into a structured context block for the LLM prompt."""
     blocks = []
     for i, row in papers_df.iterrows():
         title = row.get("title") or "(no title)"
@@ -65,7 +117,6 @@ def format_papers_for_prompt(papers_df):
 
         if isinstance(authors, str) and len(authors) > 200:
             authors = authors[:200] + "..."
-
         if isinstance(abstract, str) and len(abstract) > 1500:
             abstract = abstract[:1500] + "..."
 
@@ -77,14 +128,49 @@ def format_papers_for_prompt(papers_df):
             f"Abstract: {abstract}\n"
         )
         blocks.append(block)
-
     return "\n".join(blocks)
 
 
-def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=800):
+# ----------------------------------------------------------------------------
+# MAIN SUMMARIZATION FUNCTION
+# ----------------------------------------------------------------------------
+
+def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=800,
+                    use_cache=True, force_refresh=False):
     """
     Generates a RAG-based summary of a research topic.
+
+    Args:
+        query: search string
+        top_k: number of papers to retrieve and include in the prompt
+        temperature: LLM sampling temperature (lower = more focused)
+        max_tokens: max tokens in the generated summary
+        use_cache: read from and write to the on-disk cache
+        force_refresh: bypass cache read but still write to it
+
+    Returns:
+        dict with 'query', 'summary', 'papers_used', 'from_cache'
     """
+    key = _cache_key(query, top_k, temperature)
+
+    # check cache
+    if use_cache and not force_refresh:
+        cache = _load_cache()
+        if key in cache:
+            cached = cache[key]
+            print(f"Cache HIT for '{query}' (cached {cached.get('cached_at')})")
+            papers_used = pd.DataFrame(cached["papers_used"])
+            return {
+                "query": cached["query"],
+                "summary": cached["summary"],
+                "papers_used": papers_used,
+                "from_cache": True,
+            }
+        print(f"Cache MISS for '{query}', calling API...")
+    elif force_refresh:
+        print(f"Force refresh requested for '{query}', bypassing cache read")
+
+    # retrieve papers
     print(f"\nRetrieving top {top_k} papers for query: '{query}'")
     papers = get_papers_with_abstracts(query, top_k=top_k)
     print(f"Retrieved {len(papers)} papers")
@@ -140,27 +226,40 @@ def summarize_topic(query, top_k=8, temperature=0.3, max_tokens=800):
 
     summary = response.choices[0].message.content
 
+    papers_used = papers[["arxiv_id", "title", "authors", "citation_count", "similarity"]]
+
+    # write to cache
+    if use_cache:
+        cache = _load_cache()
+        cache[key] = {
+            "query": query,
+            "summary": summary,
+            "papers_used": papers_used.to_dict(orient="records"),
+            "cached_at": datetime.now().isoformat(),
+        }
+        _save_cache(cache)
+        print(f"Cached result under key {key[:8]}...")
+
     return {
         "query": query,
         "summary": summary,
-        "papers_used": papers[["arxiv_id", "title", "authors", "citation_count", "similarity"]]
+        "papers_used": papers_used,
+        "from_cache": False,
     }
 
 
 if __name__ == "__main__":
-    test_query = "quantum cryptography"
+    # quick test - run twice, the second call should hit cache
+    test_query = "fairness and bias in machine learning"
 
-    result = summarize_topic(test_query, top_k=8)
+    print("\n=== First call (should be cache MISS) ===")
+    result1 = summarize_topic(test_query, top_k=8)
+    print(f"\nFrom cache: {result1['from_cache']}")
 
-    print("\n" + "=" * 60)
-    print(f"QUERY: {result['query']}")
-    print("=" * 60)
+    print("\n\n=== Second call (should be cache HIT) ===")
+    result2 = summarize_topic(test_query, top_k=8)
+    print(f"\nFrom cache: {result2['from_cache']}")
+    print(f"Same summary text: {result1['summary'] == result2['summary']}")
 
-    print("\nPAPERS USED:")
-    for i, row in result["papers_used"].iterrows():
-        print(f"  - {row['title']} (citations: {row['citation_count']})")
-
-    print("\n" + "=" * 60)
-    print("SUMMARY:")
-    print("=" * 60)
-    print(result["summary"])
+    print("\n\n=== Cache stats ===")
+    cache_stats()
