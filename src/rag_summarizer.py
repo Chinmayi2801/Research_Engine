@@ -30,8 +30,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in .env file")
 
-print(f"DEBUG: GROQ_API_KEY loaded: {GROQ_API_KEY[:10]}...")
-
 client = Groq(api_key=GROQ_API_KEY)
 MODEL = "llama-3.3-70b-versatile"
 
